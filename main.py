@@ -1,7 +1,10 @@
 from telegram.ext import Application, CommandHandler
 import os, logging
 from dotenv import load_dotenv
-import psycopg2
+
+load_dotenv('settings/.env', encoding='utf-8')
+token = os.getenv('API_TOKEN')
+
 from db_conn import conn
 from note_calendar import Calendar
 
@@ -14,11 +17,6 @@ logging.basicConfig(
 
 async def start(update, context):
     await update.message.reply_text('Привет! Я бот для работы с календарём событий.')
-
-
-load_dotenv('settings/.env')
-token = os.getenv('API_TOKEN')
-
 
 def main():
     # Инициализация приложения через builder
