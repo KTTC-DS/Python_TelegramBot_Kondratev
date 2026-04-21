@@ -16,7 +16,14 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path
+from app import views
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('export/events/', views.export_events, name='export_events'),
+    # API endpoints
+    path('api/public-events/', views.public_events_list, name='api_public_events'),
+    path('api/user-events/<str:telegram_id>/', views.user_events_by_telegram, name='api_user_events'),
+    path('api/appointments/', views.appointments_list, name='api_appointments'),
+    path('api/events/<int:pk>/', views.event_detail, name='api_event_detail'),
 ]

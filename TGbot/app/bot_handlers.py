@@ -1,10 +1,16 @@
 import re
+import hashlib
+import csv
+import io
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from asgiref.sync import sync_to_async
 from django.contrib.auth.models import User
+from django.conf import settings
 from .models import UserProfile, Event, Appointment
 
+logger = logging.getLogger(__name__)
 
 # ---------- Синхронные функции для безопасного вызова через sync_to_async ----------
 def _get_user_by_telegram_id(telegram_id):
@@ -16,29 +22,25 @@ def _get_user_appointments(user):
 def _get_user_events(user):
     return list(Event.objects.filter(organizer=user).order_by('date', 'time'))
 
-
-# ---------- Вспомогательные функции (синхронные) ----------
-def get_or_create_user_profile(telegram_id, username, first_name, last_name):
+def _get_or_create_user_profile(telegram_id, username, first_name, last_name):
     try:
-        profile = UserProfile.objects.get(telegram_id=str(telegram_id))
-        return profile
+        return UserProfile.objects.get(telegram_id=str(telegram_id))
     except UserProfile.DoesNotExist:
         user = User.objects.create_user(
             username=f"tg_{telegram_id}",
             first_name=first_name or "",
             last_name=last_name or ""
         )
-        profile = UserProfile.objects.create(user=user, telegram_id=str(telegram_id))
-        return profile
+        return UserProfile.objects.create(user=user, telegram_id=str(telegram_id))
 
-def get_event_by_id(event_id):
+def _get_event_by_id(event_id):
     try:
         return Event.objects.get(id=event_id)
     except Event.DoesNotExist:
         return None
 
-def create_appointment(event, user_id):
-    appointment = Appointment.objects.create(
+def _create_appointment(event, user_id):
+    return Appointment.objects.create(
         event=event,
         user_id=user_id,
         date=event.date,
@@ -46,9 +48,8 @@ def create_appointment(event, user_id):
         details=event.description,
         status='pending'
     )
-    return appointment
 
-def update_appointment_status(appointment_id, new_status):
+def _update_appointment_status(appointment_id, new_status):
     try:
         app = Appointment.objects.get(id=appointment_id)
         app.status = new_status
@@ -57,10 +58,21 @@ def update_appointment_status(appointment_id, new_status):
     except Appointment.DoesNotExist:
         return False
 
+# ---------- Асинхронные утилиты ----------
+async def _get_user_profile_from_update(update: Update) -> UserProfile:
+    telegram_id = update.effective_user.id
+    return await sync_to_async(UserProfile.objects.get)(telegram_id=str(telegram_id))
+
+async def _get_event_and_check_owner(event_id: int, user_profile: UserProfile):
+    event = await sync_to_async(_get_event_by_id)(event_id)
+    if not event:
+        return None, False
+    return event, (event.organizer_id == user_profile.user_id)
+
 # ---------- Команда /start ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await sync_to_async(get_or_create_user_profile)(
+    await sync_to_async(_get_or_create_user_profile)(
         user.id, user.username, user.first_name, user.last_name
     )
     await update.message.reply_text(
@@ -68,9 +80,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 /create_event – создать событие\n"
         "📅 /calendar – мои встречи\n"
         "📋 /my_events – мои созданные события\n"
-        "✏️ /edit_event <id> <название> <ГГГГ-ММ-ДД> <ЧЧ:ММ> – редактировать\n"
+        "✏️ /edit_event <id> <название> <ГГГГ-ММ-ДД> <ЧЧ:ММ> [новое_описание]\n"
         "🗑 /delete_event <id> – удалить событие\n"
-        "📨 /invite <event_id> <telegram_id> – пригласить участника"
+        "📨 /invite <event_id> <telegram_id> – пригласить участника (только организатор)\n"
+        "📥 /export_events – выгрузить свои события в CSV"
     )
 
 # ---------- Команда /calendar ----------
@@ -131,24 +144,25 @@ async def create_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Время должно быть в формате ЧЧ:ММ")
         return
 
-    telegram_id = update.effective_user.id
-    profile = await sync_to_async(UserProfile.objects.get)(telegram_id=str(telegram_id))
-    user = profile.user_id
-    event = await sync_to_async(Event.objects.create)(
-        name=name, date=date, time=time, description=description,
-        organizer_id=profile.user_id  # используем user_id вместо объекта
-    )
-    profile.events_created += 1
-    await sync_to_async(profile.save)()
-
-    await update.message.reply_text(f"✅ Событие '{name}' создано с ID {event.id}")
+    try:
+        profile = await _get_user_profile_from_update(update)
+        event = await sync_to_async(Event.objects.create)(
+            name=name, date=date, time=time, description=description,
+            organizer_id=profile.user_id
+        )
+        profile.events_created += 1
+        await sync_to_async(profile.save)()
+        await update.message.reply_text(f"✅ Событие '{name}' создано с ID {event.id}")
+    except Exception as e:
+        logger.exception("Ошибка при создании события")
+        await update.message.reply_text("❌ Произошла ошибка при создании события.")
 
 # ---------- Команда /edit_event ----------
 async def edit_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 4:
         await update.message.reply_text(
-            "Использование: /edit_event <id> <новое_название> <ГГГГ-ММ-ДД> <ЧЧ:ММ>"
+            "Использование: /edit_event <id> <новое_название> <ГГГГ-ММ-ДД> <ЧЧ:ММ> [новое_описание]"
         )
         return
 
@@ -157,30 +171,29 @@ async def edit_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_name = args[1]
         new_date = args[2]
         new_time = args[3]
+        new_description = " ".join(args[4:]) if len(args) > 4 else None
     except (ValueError, IndexError):
         await update.message.reply_text("Неверный формат. ID должен быть числом.")
         return
 
-    telegram_id = update.effective_user.id
-    profile = await sync_to_async(UserProfile.objects.get)(telegram_id=str(telegram_id))
-
-    event = await sync_to_async(get_event_by_id)(event_id)
+    profile = await _get_user_profile_from_update(update)
+    event, is_owner = await _get_event_and_check_owner(event_id, profile)
     if not event:
         await update.message.reply_text(f"Событие с ID {event_id} не найдено.")
         return
-    if event.organizer_id != profile.user_id:
+    if not is_owner:
         await update.message.reply_text("❌ Вы можете редактировать только свои события.")
         return
 
-    # Обновляем поля
     event.name = new_name
     event.date = new_date
     event.time = new_time
-    await sync_to_async(event.save)()
+    if new_description is not None:
+        event.description = new_description
 
+    await sync_to_async(event.save)()
     profile.events_edited += 1
     await sync_to_async(profile.save)()
-
     await update.message.reply_text(f"✅ Событие {event_id} обновлено.")
 
 # ---------- Команда /delete_event ----------
@@ -195,21 +208,18 @@ async def delete_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ID должен быть числом.")
         return
 
-    telegram_id = update.effective_user.id
-    profile = await sync_to_async(UserProfile.objects.get)(telegram_id=str(telegram_id))
-
-    event = await sync_to_async(get_event_by_id)(event_id)
+    profile = await _get_user_profile_from_update(update)
+    event, is_owner = await _get_event_and_check_owner(event_id, profile)
     if not event:
         await update.message.reply_text(f"Событие с ID {event_id} не найдено.")
         return
-    if event.organizer_id != profile.user_id:
+    if not is_owner:
         await update.message.reply_text("❌ Вы можете удалять только свои события.")
         return
 
     profile.events_cancelled += 1
     await sync_to_async(profile.save)()
     await sync_to_async(event.delete)()
-
     await update.message.reply_text(f"✅ Событие {event_id} удалено.")
 
 # ---------- Команда /invite ----------
@@ -225,20 +235,19 @@ async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ID события и Telegram ID должны быть числами")
         return
 
-    event = await sync_to_async(get_event_by_id)(event_id)
+    # Получаем событие и проверяем права организатора
+    profile = await _get_user_profile_from_update(update)
+    event, is_owner = await _get_event_and_check_owner(event_id, profile)
     if not event:
-        await update.message.reply_text(f"Событие с ID {event_id} не найдено")
+        await update.message.reply_text(f"Событие с ID {event_id} не найдено.")
+        return
+    if not is_owner:
+        await update.message.reply_text("❌ Только организатор может приглашать на событие.")
         return
 
-    # Необязательная проверка: только организатор может приглашать
-    # telegram_id = update.effective_user.id
-    # profile = await sync_to_async(UserProfile.objects.get)(telegram_id=str(telegram_id))
-    # if event.organizer != profile.user:
-    #     await update.message.reply_text("Только организатор может приглашать.")
-    #     return
-
-    target_profile = await sync_to_async(get_or_create_user_profile)(target_tg_id, None, None, None)
-    appointment = await sync_to_async(create_appointment)(event, target_profile.user_id)
+    # Создаём или получаем профиль приглашаемого
+    target_profile = await sync_to_async(_get_or_create_user_profile)(target_tg_id, None, None, None)
+    appointment = await sync_to_async(_create_appointment)(event, target_profile.user_id)
 
     keyboard = [[
         InlineKeyboardButton("✅ Подтвердить", callback_data=f"confirm_{appointment.id}"),
@@ -264,10 +273,10 @@ async def invite(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(f"✅ Приглашение отправлено пользователю {target_tg_id}")
     except Exception as e:
+        logger.exception("Ошибка при отправке приглашения")
         await update.message.reply_text(f"❌ Не удалось отправить: {e}")
 
-
-# ---------- Команда /share_event (сделать событие публичным) ----------
+# ---------- Команда /share_event ----------
 async def share_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -279,14 +288,12 @@ async def share_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ID события должен быть числом.")
         return
 
-    telegram_id = update.effective_user.id
-    profile = await sync_to_async(UserProfile.objects.get)(telegram_id=str(telegram_id))
-    event = await sync_to_async(get_event_by_id)(event_id)
-
+    profile = await _get_user_profile_from_update(update)
+    event, is_owner = await _get_event_and_check_owner(event_id, profile)
     if not event:
         await update.message.reply_text("Событие не найдено.")
         return
-    if event.organizer_id != profile.user_id:
+    if not is_owner:
         await update.message.reply_text("❌ Вы можете делиться только своими событиями.")
         return
     if event.is_public:
@@ -295,11 +302,12 @@ async def share_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     event.is_public = True
     await sync_to_async(event.save)()
-    await update.message.reply_text(f"✅ Событие *{event.name}* теперь публично. "
-                                    f"Другие пользователи могут его видеть.", parse_mode='Markdown')
+    await update.message.reply_text(
+        f"✅ Событие *{event.name}* теперь публично. Другие пользователи могут его видеть.",
+        parse_mode='Markdown'
+    )
 
-
-# ---------- Команда /unshare_event (снять публичность) ----------
+# ---------- Команда /unshare_event ----------
 async def unshare_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
@@ -311,14 +319,12 @@ async def unshare_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ID события должен быть числом.")
         return
 
-    telegram_id = update.effective_user.id
-    profile = await sync_to_async(UserProfile.objects.get)(telegram_id=str(telegram_id))
-    event = await sync_to_async(get_event_by_id)(event_id)
-
+    profile = await _get_user_profile_from_update(update)
+    event, is_owner = await _get_event_and_check_owner(event_id, profile)
     if not event:
         await update.message.reply_text("Событие не найдено.")
         return
-    if event.organizer_id != profile.user_id:
+    if not is_owner:
         await update.message.reply_text("❌ Вы можете изменять только свои события.")
         return
     if not event.is_public:
@@ -327,13 +333,13 @@ async def unshare_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     event.is_public = False
     await sync_to_async(event.save)()
-    await update.message.reply_text(f"✅ Событие *{event.name}* теперь приватное (не публикуется).", parse_mode='Markdown')
+    await update.message.reply_text(
+        f"✅ Событие *{event.name}* теперь приватное (не публикуется).",
+        parse_mode='Markdown'
+    )
 
-
-# ---------- Команда /public_events (показать все публичные события) ----------
+# ---------- Команда /public_events ----------
 async def public_events_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать все публичные события других пользователей (и свои публичные тоже)"""
-    # Получаем все публичные события
     public_events = await sync_to_async(list)(
         Event.objects.filter(is_public=True).select_related('organizer').order_by('date', 'time')
     )
@@ -341,37 +347,68 @@ async def public_events_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🌍 Нет публичных событий.")
         return
 
-    # Текущий пользователь
     telegram_id = update.effective_user.id
     current_user = await sync_to_async(_get_user_by_telegram_id)(telegram_id)
 
     text = "🌍 *Общие события (публичные):*\n\n"
     for ev in public_events:
         organizer_name = ev.organizer.username if ev.organizer else "Неизвестный"
-        # Можно пометить свои события
         owner_mark = " *(ваше)*" if ev.organizer_id == current_user.id else ""
         text += f"• *{ev.name}*{owner_mark} – {ev.date} {ev.time}\n"
         text += f"  Организатор: {organizer_name}\n"
         text += f"  Описание: {ev.description or '—'}\n\n"
     await update.message.reply_text(text, parse_mode='Markdown')
 
-
 # ---------- Обработчик кнопок ----------
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
-    if data.startswith("confirm_"):
-        app_id = int(data.split("_")[1])
-        success = await sync_to_async(update_appointment_status)(app_id, 'confirmed')
-        if success:
-            await query.edit_message_text("✅ Вы подтвердили участие во встрече.")
-        else:
-            await query.edit_message_text("❌ Ошибка: приглашение не найдено.")
-    elif data.startswith("decline_"):
-        app_id = int(data.split("_")[1])
-        success = await sync_to_async(update_appointment_status)(app_id, 'cancelled')
-        if success:
-            await query.edit_message_text("❌ Вы отклонили приглашение.")
-        else:
-            await query.edit_message_text("❌ Ошибка: приглашение не найдено.")
+    try:
+        if data.startswith("confirm_"):
+            app_id = int(data.split("_")[1])
+            success = await sync_to_async(_update_appointment_status)(app_id, 'confirmed')
+            if success:
+                await query.edit_message_text("✅ Вы подтвердили участие во встрече.")
+            else:
+                await query.edit_message_text("❌ Ошибка: приглашение не найдено.")
+        elif data.startswith("decline_"):
+            app_id = int(data.split("_")[1])
+            success = await sync_to_async(_update_appointment_status)(app_id, 'cancelled')
+            if success:
+                await query.edit_message_text("❌ Вы отклонили приглашение.")
+            else:
+                await query.edit_message_text("❌ Ошибка: приглашение не найдено.")
+    except Exception as e:
+        logger.exception("Ошибка в callback-обработчике")
+        await query.edit_message_text("❌ Произошла ошибка при обработке.")
+
+# ---------- Команда /export_events ----------
+async def export_events_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    telegram_id = update.effective_user.id
+    user = await sync_to_async(_get_user_by_telegram_id)(telegram_id)
+    events = await sync_to_async(list)(Event.objects.filter(organizer=user).order_by('date', 'time'))
+
+    if not events:
+        await update.message.reply_text("У вас нет созданных событий для экспорта.")
+        return
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['ID', 'Название', 'Дата', 'Время', 'Описание', 'Публичное'])
+    for event in events:
+        writer.writerow([
+            event.id,
+            event.name,
+            event.date,
+            event.time,
+            event.description,
+            'Да' if event.is_public else 'Нет'
+        ])
+
+    output.seek(0)
+    await update.message.reply_document(
+        document=io.BytesIO(output.getvalue().encode('utf-8')),
+        filename=f"events_{user.username}.csv",
+        caption="📊 Ваши события"
+    )
