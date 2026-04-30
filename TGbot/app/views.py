@@ -71,7 +71,7 @@ def user_events_by_telegram(request, telegram_id):
     try:
         from .models import UserProfile
         profile = UserProfile.objects.get(telegram_id=str(telegram_id))
-        events = Event.objects.filter(organizer=profile.user).order_by('date', 'time')
+        events = Event.objects.filter(organizer=profile.user, is_public=True).order_by('date', 'time')
         serializer = EventSerializer(events, many=True)
         return Response(serializer.data)
     except UserProfile.DoesNotExist:

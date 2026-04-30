@@ -59,6 +59,7 @@ class Appointment(models.Model):
         ('pending', 'Ожидание подтверждения'),
         ('cancelled', 'Отменено'),
         ('completed', 'Завершено'),
+        ('confirmed', 'Подтверждено'),   # добавлено новое состояние
     ]
 
     user = models.ForeignKey(User, on_delete=models.CASCADE)
