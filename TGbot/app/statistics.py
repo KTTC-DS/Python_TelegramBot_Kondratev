@@ -1,28 +1,22 @@
-from .models import BotStatistics
+from django.db.models import F
 from django.utils import timezone
+from .models import BotStatistics
+
+# Допустимые поля (безопасный список)
+ALLOWED_STATISTICS_FIELDS = {'user_count', 'event_count', 'edited_events', 'cancelled_events'}
 
 def update_statistics(field_name):
     """
-    Увеличивает указанное поле в BotStatistics для текущей даты.
-    При необходимости создаёт запись.
-    Поля: 'user_count', 'event_count', 'edited_events', 'cancelled_events'
+    Атомарно увеличивает указанное поле в статистике за текущий день.
+    Допустимые имена полей: user_count, event_count, edited_events, cancelled_events.
     """
-    today = timezone.now().date()
-
-    stat, created = BotStatistics.objects.get_or_create(
-        date=today,
-        defaults={
-            'user_count': 0,
-            'event_count': 0,
-            'edited_events': 0,
-            'cancelled_events': 0,
-        }
-    )
-
-    # Увеличиваем нужное поле
-    if hasattr(stat, field_name):
-        value = getattr(stat, field_name)
-        setattr(stat, field_name, value + 1)
-        stat.save(update_fields=[field_name])  # экономим ресурсы — обновляем только одно поле
-    else:
+    if field_name not in ALLOWED_STATISTICS_FIELDS:
         raise ValueError(f"Поле '{field_name}' не существует в BotStatistics")
+
+    today = timezone.now().date()
+    stat, created = BotStatistics.objects.get_or_create(date=today)
+    if created:
+        setattr(stat, field_name, 1)
+        stat.save()
+    else:
+        BotStatistics.objects.filter(date=today).update(**{field_name: F(field_name) + 1})

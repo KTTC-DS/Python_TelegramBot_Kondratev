@@ -22,7 +22,7 @@ services:
   web:
     build: .
     container_name: tg_bot_web
-    command: python manage.py runserver 0.0.0.0:8000
+    entrypoint: /entrypoint.sh
     ports:
       - "8000:8000"
     depends_on:
@@ -44,7 +44,7 @@ services:
   bot:
     build: .
     container_name: tg_bot_bot
-    command: python bot.py
+    entrypoint: /bin/sh -c "python bot.py"
     depends_on:
       db:
         condition: service_healthy

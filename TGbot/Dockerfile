@@ -2,7 +2,8 @@
 FROM python:3.12-slim
 
 # Устанавливаем рабочую директорию внутри контейнера
-WORKDIR /TGBot
+# Должна совпадать с путём монтирования в docker-compose.yml (./:/app)
+WORKDIR /app
 
 # Устанавливаем системные зависимости для psycopg2
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -17,5 +18,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Копируем весь код проекта в контейнер
 COPY . .
 
-# Команда по умолчанию (для сервиса web). Для бота команду переопределим в docker-compose
-CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+# Копируем скрипт entrypoint и делаем его исполняемым
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Указываем entrypoint (выполняется при запуске контейнера)
+ENTRYPOINT ["/entrypoint.sh"]

@@ -67,24 +67,29 @@ DB_PASSWORD=strongpassword123
 ```
 docker-compose up --build
 ```
+
 - В отдельном терминале выполните миграции:
 
 ```bash
 docker-compose exec web python manage.py migrate
+```
+
+- (Опционально) Создайте суперпользователя для доступа в админ‑панель:
+
+```bash
 docker-compose exec web python manage.py createsuperuser
 ```
 - Бот запустится автоматически.
 
-
 ## Команды Telegram-бота
-    Команда	                                |            Описание
+    Команда	                            |            Описание
     - /start	                        - Регистрация и список команд
-    - /create_event                         - Название ГГГГ-ММ-ДД ЧЧ:ММ Описание	Создать событие
-    - /my_events	                        - Список созданных событий (с ID)
+    - /create_event                     - Создать событие (название может содержать пробелы)
+    - /my_events	                    - Список созданных событий (с ID)
     - /calendar	                        - Ваши встречи (где вы участник)
     - /edit_event <id> <новое_название> 
         <дата> <время> [новое_описание]	- Редактировать своё событие
-    - /delete_event <id>	                - Удалить своё событие
+    - /delete_event <id>	            - Удалить своё событие
     - /invite <event_id> <telegram_id>	- Пригласить пользователя на событие
     - /share_event <event_id>	        - Сделать событие публичным
     - /unshare_event <event_id>	        - Снять публичность
@@ -93,23 +98,24 @@ docker-compose exec web python manage.py createsuperuser
 
 
 ## API Endpoints
-    Метод   |	        URL	        |     Описание
-    - GET	/api/public-events/	        - Список публичных событий
+    Метод   |	        URL	                |     Описание
+    - GET	/api/public-events/	            - Список публичных событий
     - GET	/api/user-events/<telegram_id>/	- События пользователя по Telegram ID
-    - GET	/api/appointments/	        - Список всех встреч
+    - GET	/api/appointments/	            - Список всех встреч
     - GET	/api/events/<int:pk>/	        - Детали события по ID
 
 ## Тестирование
 ```bash
 docker-compose exec web python manage.py test app
 ```
-Ожидаемый результат: 18 успешных тестов.
+Ожидаемый результат: 21 успешный тест.
 
 ## Структура проекта
 text
 ```TGbot/
+TGbot/
 ├── app/                     # Основное приложение
-│   ├── migrations/          # Миграции
+│   ├── migrations/          # Миграции базы данных
 │   ├── admin.py
 │   ├── models.py
 │   ├── serializers.py
@@ -125,8 +131,9 @@ text
 ├── manage.py
 ├── requirements.txt
 ├── Dockerfile
+├── entrypoint.sh            # Автоматический прогон миграций при старте
 ├── docker-compose.yml
-├── .env
+├── .env                     # Переменные окружения (не входит в репозиторий)
 └── README.md
 ```
 

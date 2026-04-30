@@ -17,9 +17,11 @@ from .bot_handlers import (
     _get_event_by_id,
     _create_appointment,
     _update_appointment_status,
+    _get_appointment_by_id,
     _get_user_by_telegram_id,
     _get_user_appointments,
     _get_user_events,
+    find_date_index,
 )
 
 # ==================== ТЕСТЫ МОДЕЛЕЙ ====================
@@ -57,6 +59,7 @@ class ModelTests(TestCase):
         self.assertEqual(appointment.status, 'pending')
         self.assertEqual(appointment.user, self.user)
 
+
 # ==================== ТЕСТЫ ВСПОМОГАТЕЛЬНЫХ ФУНКЦИЙ ====================
 class HelperFunctionsTests(TestCase):
     def setUp(self):
@@ -92,6 +95,21 @@ class HelperFunctionsTests(TestCase):
         self.assertEqual(app.status, 'confirmed')
         self.assertFalse(_update_appointment_status(999, 'confirmed'))
 
+    def test_get_appointment_by_id(self):
+        event = Event.objects.create(name="Meeting", date=date(2025,1,1), time=time(12,0))
+        app = Appointment.objects.create(user=self.user, event=event, date=event.date, time=event.time, status='pending')
+        self.assertEqual(_get_appointment_by_id(app.id), app)
+        self.assertIsNone(_get_appointment_by_id(999))
+
+    def test_find_date_index(self):
+        args = ["event", "name", "2025-12-31", "15:00", "desc"]
+        self.assertEqual(find_date_index(args), 2)
+        args_no_date = ["event", "name", "desc"]
+        self.assertIsNone(find_date_index(args_no_date))
+        args_multi = ["2025-01-01", "10:00"]
+        self.assertEqual(find_date_index(args_multi), 0)
+
+
 # ==================== ТЕСТЫ БИЗНЕС-ЛОГИКИ ====================
 class BusinessLogicTests(TestCase):
     def setUp(self):
@@ -124,21 +142,39 @@ class BusinessLogicTests(TestCase):
         self.assertFalse(result['success'])
         self.assertIn("уже занят", result['message'])
 
+
 # ==================== ТЕСТЫ СТАТИСТИКИ ====================
 class StatisticsTests(TestCase):
-    def test_update_statistics(self):
+    def test_update_statistics_atomic(self):
         today = timezone.now().date()
+        # Первое обновление – создаёт запись со значением 1
         update_statistics('user_count')
         stat = BotStatistics.objects.get(date=today)
         self.assertEqual(stat.user_count, 1)
+
+        # Второе обновление – атомарно увеличивает
         update_statistics('user_count')
         stat.refresh_from_db()
         self.assertEqual(stat.user_count, 2)
+
+        # Другое поле
         update_statistics('event_count')
         stat.refresh_from_db()
         self.assertEqual(stat.event_count, 1)
+
+        # Несуществующее поле
         with self.assertRaises(ValueError):
             update_statistics('fake_field')
+
+    def test_statistics_multiple_updates(self):
+        today = timezone.now().date()
+        update_statistics('user_count')
+        update_statistics('user_count')
+        update_statistics('event_count')
+        stat = BotStatistics.objects.get(date=today)
+        self.assertEqual(stat.user_count, 2)
+        self.assertEqual(stat.event_count, 1)
+
 
 # ==================== ТЕСТЫ API ====================
 class APITests(TestCase):
@@ -161,12 +197,14 @@ class APITests(TestCase):
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]['name'], "Public")
 
-    def test_user_events_by_telegram(self):
+    def test_user_events_by_telegram_public_only(self):
         url = reverse('api_user_events', kwargs={'telegram_id': '222'})
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(len(data), 2)
+        # Должно быть только публичное событие (is_public=True)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]['name'], "Public")
 
     def test_user_events_not_found(self):
         url = reverse('api_user_events', kwargs={'telegram_id': '999'})
@@ -178,6 +216,7 @@ class APITests(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['name'], "Public")
+
 
 # ==================== ТЕСТЫ ЭКСПОРТА CSV ====================
 class ExportTests(TestCase):

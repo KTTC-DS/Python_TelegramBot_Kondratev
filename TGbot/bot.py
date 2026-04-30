@@ -19,7 +19,6 @@ async def error_handler(update, context):
 
 def main():
     token = os.getenv('API_TOKEN')
-    # Устанавливаем таймауты (без сложного HTTPX)
     app = (ApplicationBuilder()
            .token(token)
            .connect_timeout(30.0)
